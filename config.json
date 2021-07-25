@@ -9,5 +9,13 @@
     "logging":{
         "file":"ras.log",
         "level":"debug"
+    },
+    "settings":{
+        "alarm_buzz":false
+    },
+    "GPIO":{
+        "blue":3,
+        "yellow":7,
+        "buzzer":11
     }
 }

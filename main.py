@@ -1,11 +1,13 @@
 import picamera
+import RPi.GPIO as GPIO
+
 import cv2
 from PIL import Image, ImageDraw, ImageFont
 import numpy as np
 
 import os,sys
 import threading
-import json
+import json,requests
 import time,datetime
 import coloredlogs,logging
 
@@ -27,6 +29,23 @@ class Dict2Obj(object):
 config_txt = open("./config.json","r").read()
 config = Dict2Obj(json.loads(config_txt))
 motion_output = None
+
+# GPIO Setup
+GPIO.setwarnings(False)
+GPIO.setmode(GPIO.BOARD)
+GPIO.setup(config.GPIO.blue,GPIO.OUT)
+GPIO.setup(config.GPIO.yellow,GPIO.OUT)
+GPIO.setup(config.GPIO.buzzer,GPIO.OUT)
+
+def gpioon(port):
+    GPIO.output(port,GPIO.HIGH)
+
+def gpiooff(port):
+    GPIO.output(port,GPIO.LOW)
+
+gpiooff(config.GPIO.blue)
+gpiooff(config.GPIO.yellow)
+gpiooff(config.GPIO.buzzer)
 
 # Set logger
 
@@ -57,6 +76,23 @@ def ConfigUpdater():
         except Exception as e:
             logger.error(f"Failed to import config: {str(e)}")
         time.sleep(1)
+
+# Get DHT Info
+humidity = "--.-"
+temperature = "--.-"
+
+def GetDHTInfo():
+    global humidity
+    global temperature
+    while 1:
+        try:
+            r=requests.get("http://127.0.0.1:8001/info")
+            d=json.loads(r.text)
+            humidity = d["humidity"]
+            temperature = d["temperature"]
+            time.sleep(5)
+        except:
+            pass
 
 # Camera output and motion detection
 import io
@@ -91,12 +127,28 @@ class StreamingOutput(object):
                     frame_resolution = (int(frame_resolution[0]), int(frame_resolution[1]))
                     ratio = frame_resolution[1] / 1952
                     self.frame_cv2  = cv2.copyMakeBorder(self.frame_cv2,0,int(8 * ratio),0,0,cv2.BORDER_CONSTANT,value=[255,0,0])
-                    self.frame_cv2  = cv2.copyMakeBorder(self.frame_cv2,0,int(60 * ratio),0,0,cv2.BORDER_CONSTANT,value=[0,0,0])
+                    self.frame_cv2  = cv2.copyMakeBorder(self.frame_cv2,0,int(140 * ratio),0,0,cv2.BORDER_CONSTANT,value=[0,0,0])
+
                     shp = self.frame_cv2.shape
                     ts = self.frame_timestamp.strftime("%A %d %B %Y %H:%M:%S")
-                    cv2.putText(self.frame_cv2, f"[{config.resolution}] {ts}", (10,int(shp[0]-12*ratio)), cv2.FONT_HERSHEY_SIMPLEX, 1.4 * ratio, (255,255,255), thickness=2)
+                    memfree = 0
+                    memtotal = 1
+                    with open('/proc/meminfo',"r") as f:
+                        for l in f.readlines():
+                            if l.startswith('MemFree'):
+                                memfree = int(l.split()[1])
+                            elif l.startswith("MemTotal"):
+                                memtotal = int(l.split()[1])
+                    cputemp = float(open("/sys/class/thermal/thermal_zone0/temp","r").read())/1000
+                    data = ""
+                    if occupied:
+                        data = "[Occupied]"
+                    txt = f"{config.resolution}  |  Humidity: {humidity}%  | Temperature: {temperature}C  |  CPU Temperature: {round(cputemp,1)}C  |  MEM Used: {int((memtotal - memfree) / memtotal * 100)}% {data}"
+                    
+                    cv2.putText(self.frame_cv2, txt, (10,int(shp[0]-86*ratio)), cv2.FONT_HERSHEY_SIMPLEX, 1.4 * ratio, (255,255,255), thickness=2)
+                    cv2.putText(self.frame_cv2, ts, (10,int(shp[0]-26*ratio)), cv2.FONT_HERSHEY_SIMPLEX, 1.4 * ratio, (255,255,255), thickness=2)
                     cv2.putText(self.frame_cv2, "Captured by RPiAlarmSystem (C) 2021 Charles", 
-                        (int(shp[1]/2),int(shp[0]-12*ratio)), cv2.FONT_HERSHEY_SIMPLEX, 1.4 * ratio, (255,255,255), thickness=2)
+                        (int(shp[1]/2),int(shp[0]-26*ratio)), cv2.FONT_HERSHEY_SIMPLEX, 1.4 * ratio, (255,255,255), thickness=2)
 
                 if self.fps_ts == 0:
                     self.fps_ts = int(time.time())
@@ -153,6 +205,7 @@ class StreamingHandler(server.BaseHTTPRequestHandler):
             logger.info(f'Added streaming browser client {self.client_address}')
             try:
                 while True:
+                    gpioon(config.GPIO.blue)
                     with output.condition:
                         output.condition.wait()
                         frame = cv2.imencode('.jpg', output.frame_cv2)[1]
@@ -165,8 +218,7 @@ class StreamingHandler(server.BaseHTTPRequestHandler):
                     time.sleep(0.3)
 
             except Exception as e:
-                import traceback
-                traceback.print_exc()
+                gpiooff(config.GPIO.blue)
                 logger.warning(f'Removed streaming browser client {self.client_address} : {str(e)}')
 
         elif self.path == '/stream.dat':
@@ -179,6 +231,7 @@ class StreamingHandler(server.BaseHTTPRequestHandler):
             logger.info(f'Added streaming software client {self.client_address}')
             try:
                 while True:
+                    gpioon(config.GPIO.blue)
                     with output.condition:
                         output.condition.wait()
                         frame = output.frame_cv2
@@ -191,8 +244,7 @@ class StreamingHandler(server.BaseHTTPRequestHandler):
                     time.sleep(0.1)
 
             except Exception as e:
-                import traceback
-                traceback.print_exc()
+                gpiooff(config.GPIO.blue)
                 logger.warning(f'Removed streaming software client {self.client_address} : {str(e)}')
         
         elif self.path == '/status':
@@ -219,8 +271,6 @@ class StreamingHandler(server.BaseHTTPRequestHandler):
                     time.sleep(0.5)
 
             except Exception as e:
-                import traceback
-                traceback.print_exc()
                 logger.warning(f'Removed status streaming client {self.client_address} : {str(e)}')
 
         else:
@@ -235,6 +285,23 @@ class StreamingServer(socketserver.ThreadingMixIn, server.HTTPServer):
 finish_save_time = 0
 
 def MotionDetection():
+    def AlarmReaction():
+        t = threading.currentThread()
+        while getattr(t, "alarm", True):
+            for _ in range(3):
+                gpioon(config.GPIO.yellow)
+                if config.settings.alarm_buzz:
+                    gpioon(config.GPIO.buzzer)
+                time.sleep(0.1)
+                gpiooff(config.GPIO.yellow)
+                gpiooff(config.GPIO.buzzer)
+                time.sleep(0.1)
+            time.sleep(0.2)
+        gpiooff(config.GPIO.yellow)
+        gpiooff(config.GPIO.buzzer)
+    alarm_reaction = threading.Thread(target=AlarmReaction)
+    alarm_reaction.alarm = True
+
     time.sleep(5)
     logger.info("Motion Detection started!")
     first_frame = None
@@ -280,16 +347,21 @@ def MotionDetection():
             (x, y, w, h) = cv2.boundingRect(c)
             cv2.rectangle(threshold, (x, y), (x + w, y + h), (0, 255, 0), 2)
             movement_cnt += 1
-
+        
         # Alert
         if movement_cnt != 0:
             logger.warning(f"Detected {movement_cnt} movement(s)!")
             occupied = True
             finish_save_time = time.time() + 3
             first_frame = gray
+            if not alarm_reaction.is_alive():
+                alarm_reaction = threading.Thread(target=AlarmReaction)
+                alarm_reaction.alarm = True
+                alarm_reaction.start()
         else:
             if finish_save_time <= time.time():
                 occupied = False
+                alarm_reaction.alarm = False
 
         ed_time=time.time()
         logger.debug(f"The last round of motion detection took {round(ed_time-st_time,2)} seconds")
@@ -299,6 +371,7 @@ def MotionDetection():
 if __name__ == "__main__":
     threading.Thread(target=MotionDetection).start()
     threading.Thread(target=ConfigUpdater).start()
+    threading.Thread(target=GetDHTInfo).start()
     with picamera.PiCamera(resolution=config.resolution, framerate=config.fps) as camera:
         time.sleep(3)
         camera.start_recording(output, format='mjpeg')
