@@ -3,3 +3,4 @@ rpi.gpio==0.7.0
 numpy==1.16.2
 werkzeug==2.0.1
 coloredlogs==15.0.1
+flask==1.1.2
