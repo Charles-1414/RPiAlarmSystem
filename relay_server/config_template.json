@@ -1,0 +1,15 @@
+{
+    "token": "[the same token as the one on your pi]",
+    "streaming": {
+        "user": "[any username is ok]",
+        "password": "[plain text password]"
+        // This credential is used to login when watching a stream
+        // The password can be any text. But make sure it's not started with '!' or the script may fail
+        // Your password will be hashed when you run the script and this file will be updated
+    },
+    "logging":{
+        "file":"ras.log",
+        "level":"info",
+        "display_level":"debug"
+    }
+}

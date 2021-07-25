@@ -1,16 +1,15 @@
 import picamera
 import RPi.GPIO as GPIO
 
-import cv2
-from PIL import Image, ImageDraw, ImageFont
+import cv2 # install it with `apt-get install python3-opencv`
 import numpy as np
 
-import os,sys
+import os, sys
 import threading
-import base64,hashlib
-import json,requests
-import time,datetime
-import coloredlogs,logging
+from werkzeug.security import generate_password_hash, check_password_hash
+import json, requests
+import time, datetime
+import coloredlogs, logging
 
 # Starting
 script_start_time = time.time()
@@ -405,61 +404,6 @@ class StreamingHandler(server.BaseHTTPRequestHandler):
                     gpiooff(config.GPIO.blue)
                 logger.warning(f'Removed streaming browser client {self.client_address} : {str(e)}')
 
-        elif self.path == '/stream.dat':
-            self.send_response(200)
-            self.send_header('Age', 0)
-            self.send_header('Cache-Control', 'no-cache, private')
-            self.send_header('Pragma', 'no-cache')
-            self.send_header('Content-Type', 'multipart/x-mixed-replace; boundary=FRAME')
-            self.end_headers()
-            logger.info(f'Added streaming software client {self.client_address}')
-            streaming_status += 2
-            try:
-                while True:
-                    gpioon(config.GPIO.blue)
-                    with output.condition:
-                        output.condition.wait()
-                        frame = output.frame_cv2
-                    self.wfile.write(b'--FRAME\r\n')
-                    self.send_header('Content-Type', 'application/octet-stream')
-                    self.send_header('Content-Length', len(frame))
-                    self.end_headers()
-                    self.wfile.write(frame)
-                    self.wfile.write(b'\r\n')
-                    time.sleep(0.1)
-
-            except Exception as e:
-                streaming_status -= 2
-                if streaming_status == 0:
-                    gpiooff(config.GPIO.blue)
-                logger.warning(f'Removed streaming software client {self.client_address} : {str(e)}')
-        
-        elif self.path == '/status':
-            self.send_response(200)
-            self.send_header('Age', 0)
-            self.send_header('Cache-Control', 'no-cache, private')
-            self.send_header('Pragma', 'no-cache')
-            self.send_header('Content-Type', 'multipart/x-mixed-replace; boundary=FRAME')
-            self.end_headers()
-            logger.info(f'Added status streaming client {self.client_address}')
-            try:
-                while True:
-                    data = ""
-                    if occupied:
-                        data = "Occupied"
-                    else:
-                        data = "Not occupied"
-                    self.wfile.write(b'--FRAME\r\n')
-                    self.send_header('Content-Type', 'text/event-stream')
-                    self.send_header('Content-Length', len(data))
-                    self.end_headers()
-                    self.wfile.write(data.encode("utf-8"))
-                    self.wfile.write(b'\r\n')
-                    time.sleep(0.5)
-
-            except Exception as e:
-                logger.warning(f'Removed status streaming client {self.client_address} : {str(e)}')
-
         else:
             self.send_error(404)
             self.end_headers()
@@ -487,39 +431,79 @@ def WANStreaming():
     session = requests.Session()
     session.verify = True
 
-    # Verify Relay Server
-    hashed_token = hashlib.sha256(config.relay.token.encode()).hexdigest()
-    r = session.post(config.relay.server + "verify", data = {"token" : hashed_token, "shape" : str(frame.shape)[1:-1]}, \
-        headers = {'User-Agent': 'RPiAlarmSystem'})
-    ok = False
-    if r.status_code == 200:
-        d = json.loads(r.text)
-        if d["success"] is True:
-            if d["token"] == config.relay.token:
-                ok = True
+    def VerifyRelayServer():
+        ok = 0
+        hashed_token = generate_password_hash(config.relay.token)
+        r = session.post(config.relay.server + "verify", data = {"token" : hashed_token}, headers = {'User-Agent': 'RPiAlarmSystem'})
+        if r.status_code == 200:
+            d = json.loads(r.text)
+            if d["success"] is True:
+                if d["token"] != hashed_token and check_password_hash(d["token"], config.relay.token):
+                    ok = 1
+                else:
+                    ok = -1
             else:
-                ok = False
+                ok = -1
         else:
-            ok = False
-    else:
-        ok = False
+            ok = 0
+        return ok
+
+    ok = 0
+    for _ in range(5):
+        # Verify Relay Server
+        ok = VerifyRelayServer()
+        if ok == 0:
+            logger.warning("Failed to connect to relay server. Retrying after 30 seconds...")
+            time.sleep(30)
+            continue
+        
+        elif ok == -1:
+            logger.warning("Failed to verify relay server. WAN Streaming disabled.")
+            return
+
+        logger.info("Successfully verified relay server. Starting WAN Streaming.")
+        break
     
-    if not ok:
-        logger.warning("Failed to verify relay server. WAN Streaming disabled.")
+    if ok == 0:
+        logger.warning("Failed to connect to relay server. WAN Streaming disabled.")
         return
-    logger.info("Successfully verified relay server. Starting WAN Streaming.")
+
 
     # Prepare to stream
     time.sleep(30)
-    headers = {"Token" : config.relay.token, 'User-Agent': 'RPiAlarmSystem'}
     global streaming_status
-    stream_was_on = False
+    stream_was_on = True
 
+    last_verify = time.time()
     while 1:
+        # Update hashed token each loop
+        headers = {"Token" : generate_password_hash(config.relay.token), 'User-Agent': 'RPiAlarmSystem'}
+
+        # Verify server every 5 minutes
+        if time.time() - last_verify >= 300:
+            while 1:
+                # Verify Relay Server
+                ok = VerifyRelayServer()
+                if ok == 0:
+                    logger.warning("Failed to connect to relay server. Retrying after 30 seconds...")
+                    time.sleep(30)
+                    continue
+                
+                elif ok == -1:
+                    logger.warning("Failed to verify relay server. WAN Streaming disabled.")
+                    return
+
+                logger.info("Successfully verified relay server. Starting WAN Streaming.")
+                break
+
+
         # first comfirm someone is watching the stream to reduce the use of
         # system resource and server bandwidth
         if not stream_was_on:
             r = session.get(config.relay.server + "relay", headers = headers)
+            if r.status_code != 200:
+                continue
+            
             d = json.loads(r.text)
             if d["streaming_status"] is False:
                 if stream_was_on:
@@ -536,15 +520,14 @@ def WANStreaming():
         frame = None
         with output.condition:
             output.condition.wait()
-            frame = output.frame_cv2
+            frame = cv2.imencode('.jpg', output.frame_cv2)[1].tobytes()
 
-        # as pi has really slow computing power, we'll upload the bytes array
+        # (abandoned) as pi has really slow computing power, we'll upload the bytes array
         # to the server and let the server encode it to jpeg image
-        frame_np = base64.b64encode(frame.tostring()).decode()
-    
-        shape = str(frame.shape)[1:-1]
-        
-        r = session.post(config.relay.server + "relay", data = {"frame_np" : frame_np, "shape": shape}, headers = headers)
+        # (current) due to the really slow network speed, I decided to encode img on pi
+        # the numpy size is more than 20x bigger than jpg size
+
+        r = session.post(config.relay.server + "relay", data = frame , headers = headers)
         if r.status_code == 200:
             d = json.loads(r.text)
             if d["streaming_status"] is False:
@@ -557,19 +540,18 @@ def WANStreaming():
             logger.error("Unknown error occured at relay server")
             time.sleep(5)
 
-        
         time.sleep(0.1)
 
 # Starting show
-# for _ in range(3):
-#     gpioon(config.GPIO.blue)
-#     gpioon(config.GPIO.yellow)
-#     gpioon(config.GPIO.buzzer)
-#     time.sleep(0.5)
-#     gpiooff(config.GPIO.blue)
-#     gpiooff(config.GPIO.yellow)
-#     gpiooff(config.GPIO.buzzer)
-#     time.sleep(0.5)
+for _ in range(3):
+    gpioon(config.GPIO.blue)
+    gpioon(config.GPIO.yellow)
+    gpioon(config.GPIO.buzzer)
+    time.sleep(0.5)
+    gpiooff(config.GPIO.blue)
+    gpiooff(config.GPIO.yellow)
+    gpiooff(config.GPIO.buzzer)
+    time.sleep(0.5)
 
 for _ in range(25):
     gpioon(config.GPIO.blue)

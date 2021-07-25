@@ -3,5 +3,3 @@ config.json
 
 # ignore the bad-written plan
 plan.docx
-
-relayserver.py
