@@ -7,6 +7,7 @@ import numpy as np
 
 import os,sys
 import threading
+import base64
 import json,requests
 import time,datetime
 import coloredlogs,logging
@@ -48,6 +49,7 @@ gpiooff(config.GPIO.buzzer)
 
 # Set logger
 coloredlogs.install()
+coloredlogs.set_level(config.logging.display_level.upper())
 loglvl = {"debug": logging.DEBUG, "info": logging.INFO, "warning": logging.WARNING, "error": logging.ERROR, "critical": logging.CRITICAL}
 logger = logging.getLogger("RASlogger")
 logger.setLevel(loglvl[config.logging.level.lower()])
@@ -112,7 +114,7 @@ class VideoWriter(object):
                     self.frame_written+=1
                     continue
                 if self.mem_warn is True and self.mem_warn_starting_frame <= self.frame_written:
-                    for _ in range(0,int(config.fps/2)): # limit to 2 fps
+                    for _ in range(0,int(avgfps/2)): # limit to 2 fps
                         self.video_writer.write(self.frames[self.frame_written+1])
                     self.frame_written+=1
                 else:
@@ -146,6 +148,7 @@ class StreamingOutput(object):
 
     def write(self, buf):
         global video_writers
+        global avgfps
         if buf.startswith(b'\xff\xd8'):
             # New frame, copy the existing buffer's content and notify all clients it's available
             self.buffer.truncate()
@@ -212,7 +215,6 @@ class StreamingOutput(object):
                     if self.fps_ts == int(time.time()):
                         self.fps_cnt += 1
                     else:
-                        global avgfps
                         if self.fps_cnt >= 6:
                             avgfps = round((avgfps + self.fps_cnt) / 2, 2)
                         logger.debug(f"Current FPS: {self.fps_cnt} frames | Average FPS: {avgfps} frames")
@@ -344,6 +346,8 @@ def MotionDetection():
 import socketserver
 from http import server
 
+streaming_status = 0
+
 ## Limit the width and height to decrease delay
 resolution = config.resolution.split("x")
 width , height = int(resolution[0]), int(resolution[1])
@@ -359,6 +363,7 @@ STREAMING_PAGE=f"""<title>RPiAlarmSystem Streaming</title>
 
 class StreamingHandler(server.BaseHTTPRequestHandler):
     def do_GET(self):
+        global streaming_status
         if self.path == '/stream':
             content = STREAMING_PAGE.encode('utf-8')
             self.send_response(200)
@@ -375,6 +380,7 @@ class StreamingHandler(server.BaseHTTPRequestHandler):
             self.send_header('Content-Type', 'multipart/x-mixed-replace; boundary=FRAME')
             self.end_headers()
             logger.info(f'Added streaming browser client {self.client_address}')
+            streaming_status += 1
             try:
                 while True:
                     gpioon(config.GPIO.blue)
@@ -390,7 +396,9 @@ class StreamingHandler(server.BaseHTTPRequestHandler):
                     time.sleep(0.3)
 
             except Exception as e:
-                gpiooff(config.GPIO.blue)
+                streaming_status -= 1
+                if streaming_status == 0:
+                    gpiooff(config.GPIO.blue)
                 logger.warning(f'Removed streaming browser client {self.client_address} : {str(e)}')
 
         elif self.path == '/stream.dat':
@@ -401,6 +409,7 @@ class StreamingHandler(server.BaseHTTPRequestHandler):
             self.send_header('Content-Type', 'multipart/x-mixed-replace; boundary=FRAME')
             self.end_headers()
             logger.info(f'Added streaming software client {self.client_address}')
+            streaming_status += 2
             try:
                 while True:
                     gpioon(config.GPIO.blue)
@@ -416,7 +425,9 @@ class StreamingHandler(server.BaseHTTPRequestHandler):
                     time.sleep(0.1)
 
             except Exception as e:
-                gpiooff(config.GPIO.blue)
+                streaming_status -= 2
+                if streaming_status == 0:
+                    gpiooff(config.GPIO.blue)
                 logger.warning(f'Removed streaming software client {self.client_address} : {str(e)}')
         
         elif self.path == '/status':
@@ -453,10 +464,82 @@ class StreamingServer(socketserver.ThreadingMixIn, server.HTTPServer):
     allow_reuse_address = True
     daemon_threads = True
 
+# WAN Streaming (Sending data to relay server)
+upload_threads = 0
+avg_upload_time = -1
+def WANStreaming():
+    time.sleep(30)
+    headers = {"auth" : config.relay.token}
+    global streaming_status
+    stream_was_on = False
+    global upload_threads
+    global avg_upload_time
+
+    def Upload(frame_np, shape):
+        global streaming_status
+        global stream_was_on
+        global upload_threads
+        global avg_upload_time
+        st = time.time()
+        r = requests.post(config.relay.server_path, data = {"frame_np" : frame_np, "shape": shape}, headers = headers)
+        ed = time.time()
+        if avg_upload_time == -1:
+            avg_upload_time = round(ed - st, 2)
+        else:
+            avg_upload_time = (avg_upload_time + round(ed - st, 2)) / 2
+        if r.status_code == 200:
+            d = json.loads(r.text)
+            if d["streaming_status"] is False:
+                streaming_status -= 1
+                stream_was_on = False
+                if streaming_status == 0:
+                    gpiooff(config.GPIO.blue)
+
+        else:
+            logger.error("Unknown error occured at relay server")
+            time.sleep(5)
+        upload_threads -= 1
+
+    while 1:
+        # first comfirm someone is watching the stream to reduce the use of
+        # system resource and server bandwidth
+        if not stream_was_on:
+            r = requests.get(config.relay.server_path, headers = headers)
+            d = json.loads(r.text)
+            if d["streaming_status"] is False:
+                if stream_was_on:
+                    streaming_status -= 1
+                    if streaming_status == 0:
+                        gpiooff(config.GPIO.blue)
+                time.sleep(5) # to reduce CPU use and also not to be recognized as an attack
+                continue
+            
+            streaming_status += 1
+            stream_was_on = True
+
+        gpioon(config.GPIO.blue)
+        frame = None
+        with output.condition:
+            output.condition.wait()
+            frame = output.frame_cv2
+
+        # as pi has really slow computing power, we'll upload the bytes array
+        # to the server and let the server encode it to jpeg image
+        frame_np = base64.b64encode(frame.tostring()).decode()
+        
+        if upload_threads < config.relay.local_thread:
+            upload_threads += 1
+            threading.Thread(target=Upload,args=(frame_np, str(frame.shape)[1:-1],)).start()
+        
+        # expectation: 2 fps
+        time.sleep(max((1 / config.relay.desired_fps) - (avg_upload_time / config.relay.local_thread),0))
+
+
 if __name__ == "__main__":
     threading.Thread(target=MotionDetection).start()
     threading.Thread(target=ConfigUpdater).start()
     threading.Thread(target=GetDHTInfo).start()
+    threading.Thread(target=WANStreaming).start()
     with picamera.PiCamera(resolution=config.resolution, framerate=config.fps) as camera:
         time.sleep(3)
         camera.start_recording(output, format='mjpeg')
