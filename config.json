@@ -1,0 +1,13 @@
+{
+    "fps":12,
+    "resolution":"1296x976",
+    "motion_detection":{
+        "resolution":"648x488",
+        "threads":1,
+        "min_size":1000
+    },
+    "logging":{
+        "file":"ras.log",
+        "level":"debug"
+    }
+}
