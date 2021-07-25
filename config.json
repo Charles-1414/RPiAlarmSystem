@@ -17,6 +17,7 @@
     "GPIO":{
         "blue":3,
         "yellow":7,
-        "buzzer":11
+        "buzzer":11,
+        "dht":14
     }
 }
