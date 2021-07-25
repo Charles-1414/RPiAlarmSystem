@@ -13,9 +13,9 @@ class DHTHandler(server.BaseHTTPRequestHandler):
         if self.path == "/info":
             humidity, temperature = DHT.read_retry(DHT.DHT11, 14)
             if humidity is None:
-                humidity = "--.-"
+                humidity = "--"
             if temperature is None:
-                temperature = "--.-"
+                temperature = "--"
             d = json.dumps({"humidity": str(humidity), "temperature": str(temperature)})
             self.send_response(200)
             self.send_header('Content-Type', 'text/json')

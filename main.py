@@ -16,7 +16,6 @@ script_start_time = time.time()
 # No actual running within first 15 seconds
 
 # Import config
-
 class Dict2Obj(object):
     def __init__(self, d):
         for key in d:
@@ -48,7 +47,6 @@ gpiooff(config.GPIO.yellow)
 gpiooff(config.GPIO.buzzer)
 
 # Set logger
-
 coloredlogs.install()
 loglvl = {"debug": logging.DEBUG, "info": logging.INFO, "warning": logging.WARNING, "error": logging.ERROR, "critical": logging.CRITICAL}
 logger = logging.getLogger("RASlogger")
@@ -61,7 +59,6 @@ logger.addHandler(handler)
 logger.info("RAS started")
 
 # Config Updater 
-
 def ConfigUpdater():
     global config
     global config_txt
@@ -78,8 +75,8 @@ def ConfigUpdater():
         time.sleep(1)
 
 # Get DHT Info
-humidity = "--.-"
-temperature = "--.-"
+humidity = "--"
+temperature = "--"
 
 def GetDHTInfo():
     global humidity
@@ -90,15 +87,52 @@ def GetDHTInfo():
             d=json.loads(r.text)
             humidity = d["humidity"]
             temperature = d["temperature"]
-            time.sleep(5)
         except:
             pass
+        time.sleep(3)
 
-# Camera output and motion detection
+# Video Writer
+fourcc = cv2.VideoWriter_fourcc('m', 'p', '4', 'v')
+class VideoWriter(object):
+    def __init__(self):
+        self.video_writer = None
+        self.frames = {}
+        self.frame_cnt = 0
+        self.frame_written = 0
+        self.do_write = True
+
+        self.mem_warn = False
+        self.mem_warn_starting_frame = 0
+
+    def write(self,writer_id):
+        logger.info(f"Video Writer {writer_id} started")
+        while self.do_write or self.frame_written < self.frame_cnt:
+            if self.frame_written < self.frame_cnt:
+                if not self.frame_written+1 in self.frames.keys():
+                    self.frame_written+=1
+                    continue
+                if self.mem_warn is True and self.mem_warn_starting_frame <= self.frame_written:
+                    for _ in range(0,int(config.fps/2)): # limit to 2 fps
+                        self.video_writer.write(self.frames[self.frame_written+1])
+                    self.frame_written+=1
+                else:
+                    self.video_writer.write(self.frames[self.frame_written+1])
+                    self.frame_written+=1
+                del self.frames[self.frame_written]
+            time.sleep(0.1)
+        self.video_writer.release()
+        logger.info(f"Video Writer {writer_id} stopped")
+
+video_writer_in_use = 0
+total_video_writers = 0
+video_writers = {}
+
+# Camera output
 import io
 from threading import Condition
 
 occupied = False
+avgfps = config.fps
 
 class StreamingOutput(object):
     def __init__(self):
@@ -111,6 +145,7 @@ class StreamingOutput(object):
         self.fps_cnt = 0
 
     def write(self, buf):
+        global video_writers
         if buf.startswith(b'\xff\xd8'):
             # New frame, copy the existing buffer's content and notify all clients it's available
             self.buffer.truncate()
@@ -118,6 +153,7 @@ class StreamingOutput(object):
                 self.frame_org = self.buffer.getvalue()
                 self.frame_timestamp = datetime.datetime.now()
                 
+                memfree = 0
                 if len(self.frame_org) > 1000:
                     # add watermark
                     frame_np = np.asarray(bytearray(self.frame_org), dtype=np.uint8)
@@ -128,6 +164,8 @@ class StreamingOutput(object):
                     ratio = frame_resolution[1] / 1952
                     self.frame_cv2  = cv2.copyMakeBorder(self.frame_cv2,0,int(8 * ratio),0,0,cv2.BORDER_CONSTANT,value=[255,0,0])
                     self.frame_cv2  = cv2.copyMakeBorder(self.frame_cv2,0,int(140 * ratio),0,0,cv2.BORDER_CONSTANT,value=[0,0,0])
+
+                    text_color = (255,255,255)
 
                     shp = self.frame_cv2.shape
                     ts = self.frame_timestamp.strftime("%A %d %B %Y %H:%M:%S")
@@ -140,15 +178,33 @@ class StreamingOutput(object):
                             elif l.startswith("MemTotal"):
                                 memtotal = int(l.split()[1])
                     cputemp = float(open("/sys/class/thermal/thermal_zone0/temp","r").read())/1000
-                    data = ""
+                    memwarn = ""
+                    if memfree/1024 < 100:
+                        memwarn = "[Low MEM]"
+                        text_color = (0,255,255)
+                    txt = f"{config.resolution}  |  Humidity: {humidity}%  | Temperature: {temperature}C  |  CPU Temperature: {round(cputemp,1)}C  |  MEM Used: {int((memtotal - memfree) / memtotal * 100)}% {memwarn}"
+
                     if occupied:
-                        data = "[Occupied]"
-                    txt = f"{config.resolution}  |  Humidity: {humidity}%  | Temperature: {temperature}C  |  CPU Temperature: {round(cputemp,1)}C  |  MEM Used: {int((memtotal - memfree) / memtotal * 100)}% {data}"
-                    
-                    cv2.putText(self.frame_cv2, txt, (10,int(shp[0]-86*ratio)), cv2.FONT_HERSHEY_SIMPLEX, 1.4 * ratio, (255,255,255), thickness=2)
-                    cv2.putText(self.frame_cv2, ts, (10,int(shp[0]-26*ratio)), cv2.FONT_HERSHEY_SIMPLEX, 1.4 * ratio, (255,255,255), thickness=2)
+                        text_color = (0,0,255)
+
+                    cv2.putText(self.frame_cv2, txt, (10,int(shp[0]-86*ratio)), cv2.FONT_HERSHEY_SIMPLEX, 1.4 * ratio, text_color, thickness=2)
+                    cv2.putText(self.frame_cv2, ts, (10,int(shp[0]-26*ratio)), cv2.FONT_HERSHEY_SIMPLEX, 1.4 * ratio, text_color, thickness=2)
                     cv2.putText(self.frame_cv2, "Captured by RPiAlarmSystem (C) 2021 Charles", 
-                        (int(shp[1]/2),int(shp[0]-26*ratio)), cv2.FONT_HERSHEY_SIMPLEX, 1.4 * ratio, (255,255,255), thickness=2)
+                        (int(shp[1]/2),int(shp[0]-26*ratio)), cv2.FONT_HERSHEY_SIMPLEX, 1.4 * ratio, text_color, thickness=2)
+
+
+                if occupied and video_writer_in_use != 0:
+                    memfree /= 1024
+                    if memfree < 50:
+                        if video_writers[video_writer_in_use].mem_warn is False:
+                            video_writers[video_writer_in_use].mem_warn = True
+                            video_writers[video_writer_in_use].mem_warn_starting_frame = video_writers[video_writer_in_use].frame_cnt + 1
+                        if self.fps_cnt in [int(avgfps / 2) - 1, int(avgfps) - 1]: # limit to 2 fps
+                            video_writers[video_writer_in_use].frames[video_writers[video_writer_in_use].frame_cnt + 1] = self.frame_cv2
+                            video_writers[video_writer_in_use].frame_cnt += 1
+                    else:
+                        video_writers[video_writer_in_use].frames[video_writers[video_writer_in_use].frame_cnt + 1] = self.frame_cv2
+                        video_writers[video_writer_in_use].frame_cnt += 1
 
                 if self.fps_ts == 0:
                     self.fps_ts = int(time.time())
@@ -156,7 +212,10 @@ class StreamingOutput(object):
                     if self.fps_ts == int(time.time()):
                         self.fps_cnt += 1
                     else:
-                        logger.info(f"Current FPS: {self.fps_cnt} frames")
+                        global avgfps
+                        if self.fps_cnt >= 6:
+                            avgfps = round((avgfps + self.fps_cnt) / 2, 2)
+                        logger.debug(f"Current FPS: {self.fps_cnt} frames | Average FPS: {avgfps} frames")
                         self.fps_cnt = 0
                         self.fps_ts = int(time.time())
                 
@@ -167,6 +226,119 @@ class StreamingOutput(object):
         return self.buffer.write(buf)
 
 output = StreamingOutput()
+
+# Motion Detection
+finish_save_time = 100000000000
+
+def MotionDetection():
+    def AlarmReaction():
+        t = threading.currentThread()
+        while getattr(t, "alarm", True):
+            for _ in range(3):
+                gpioon(config.GPIO.yellow)
+                if config.settings.alarm_buzz:
+                    gpioon(config.GPIO.buzzer)
+                time.sleep(0.1)
+                gpiooff(config.GPIO.yellow)
+                gpiooff(config.GPIO.buzzer)
+                time.sleep(0.1)
+            time.sleep(0.2)
+        gpiooff(config.GPIO.yellow)
+        gpiooff(config.GPIO.buzzer)
+    alarm_reaction = threading.Thread(target=AlarmReaction)
+    alarm_reaction.alarm = True
+
+    time.sleep(5)
+    logger.info("Motion Detection started!")
+    first_frame = None
+    while 1:
+        frame = None
+        backup_frame = None
+        with output.condition:
+            output.condition.wait()
+            frame = output.frame_cv2
+            backup_frame = frame
+
+        st_time=time.time()
+        global occupied
+        global finish_save_time
+        
+        # Compress image (must do!)
+        resize_resolution = config.motion_detection.resolution.split("x")
+        frame = cv2.resize(frame, (int(resize_resolution[0]), int(resize_resolution[1])), interpolation = cv2.INTER_AREA)
+
+        # Convert frame to GrayScale
+        gray = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
+        gray = cv2.GaussianBlur(gray,(21,21),0)
+
+        # Saving the first frame if it doesn't exist
+        if first_frame is None:
+            first_frame = gray
+            continue
+
+        # Real Motion Detection starts from here!
+        
+        # Calculates difference to detect motion
+        delta_frame = cv2.absdiff(first_frame, gray)
+
+        # Applies threshold and converts it to black & white image
+        threshold = cv2.threshold(delta_frame, 100, 255, cv2.THRESH_BINARY)[1]
+        threshold = cv2.dilate(threshold, None, iterations=0)
+
+        # Finding contours on the white portion(made by the threshold)
+        _,cnts,_ = cv2.findContours(threshold, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        movement_cnt = 0
+        for c in cnts:
+            if cv2.contourArea(c) < config.motion_detection.min_size:
+                continue
+
+            (x, y, w, h) = cv2.boundingRect(c)
+            cv2.rectangle(threshold, (x, y), (x + w, y + h), (0, 255, 0), 2)
+            movement_cnt += 1
+        
+        # Alert
+        global video_writers
+        global video_writer_in_use
+        global total_video_writers
+        if movement_cnt != 0:
+            logger.warning(f"Detected {movement_cnt} movement(s)!")
+            occupied = True
+            finish_save_time = time.time() + 3
+            first_frame = gray
+            f = config.settings.saving_dir
+            if not f.endswith("/"):
+                f += "/"
+            f += f"{int(time.time())}.mp4"
+            ratio = int(resolution[1]) / 1952
+            
+            if video_writer_in_use == 0:
+                video_writer_in_use = total_video_writers + 1
+                total_video_writers += 1
+                vw = VideoWriter()
+                vw.video_writer = cv2.VideoWriter(f, fourcc, \
+                    round(avgfps), (int(resolution[0]), int(resolution[1]) + int(148 * ratio)))
+                vw.frame_cnt += 1
+                vw.frames[vw.frame_cnt] = backup_frame
+                video_writers[video_writer_in_use] = vw
+                threading.Thread(target=video_writers[video_writer_in_use].write,args=(video_writer_in_use,)).start()
+
+            if not alarm_reaction.is_alive():
+                alarm_reaction = threading.Thread(target=AlarmReaction)
+                alarm_reaction.alarm = True
+                alarm_reaction.start()
+        else:
+            if finish_save_time <= time.time():
+                logger.info(f"Video Writer {video_writer_in_use} to finish writing and save")
+                finish_save_time = 100000000000
+                occupied = False
+                alarm_reaction.alarm = False
+                video_writers[video_writer_in_use].do_write = False
+                video_writer_in_use = 0
+
+        ed_time=time.time()
+        logger.debug(f"The last round of motion detection took {round(ed_time-st_time,2)} seconds")
+
+        time.sleep(0.05)
 
 # Streaming server
 import socketserver
@@ -280,93 +452,6 @@ class StreamingHandler(server.BaseHTTPRequestHandler):
 class StreamingServer(socketserver.ThreadingMixIn, server.HTTPServer):
     allow_reuse_address = True
     daemon_threads = True
-
-# Motion Detection
-finish_save_time = 0
-
-def MotionDetection():
-    def AlarmReaction():
-        t = threading.currentThread()
-        while getattr(t, "alarm", True):
-            for _ in range(3):
-                gpioon(config.GPIO.yellow)
-                if config.settings.alarm_buzz:
-                    gpioon(config.GPIO.buzzer)
-                time.sleep(0.1)
-                gpiooff(config.GPIO.yellow)
-                gpiooff(config.GPIO.buzzer)
-                time.sleep(0.1)
-            time.sleep(0.2)
-        gpiooff(config.GPIO.yellow)
-        gpiooff(config.GPIO.buzzer)
-    alarm_reaction = threading.Thread(target=AlarmReaction)
-    alarm_reaction.alarm = True
-
-    time.sleep(5)
-    logger.info("Motion Detection started!")
-    first_frame = None
-    while 1:
-        frame = None
-        with output.condition:
-            output.condition.wait()
-            frame = output.frame_cv2
-
-        st_time=time.time()
-        global occupied
-        global finish_save_time
-        
-        # Compress image (must do!)
-        resize_resolution = config.motion_detection.resolution.split("x")
-        frame = cv2.resize(frame, (int(resize_resolution[0]), int(resize_resolution[1])), interpolation = cv2.INTER_AREA)
-
-        # Convert frame to GrayScale
-        gray = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
-        gray = cv2.GaussianBlur(gray,(21,21),0)
-
-        # Saving the first frame if it doesn't exist
-        if first_frame is None:
-            first_frame = gray
-            continue
-
-        # Real Motion Detection starts from here!
-        
-        # Calculates difference to detect motion
-        delta_frame = cv2.absdiff(first_frame, gray)
-
-        # Applies threshold and converts it to black & white image
-        threshold = cv2.threshold(delta_frame, 100, 255, cv2.THRESH_BINARY)[1]
-        threshold = cv2.dilate(threshold, None, iterations=0)
-
-        # Finding contours on the white portion(made by the threshold)
-        _,cnts,_ = cv2.findContours(threshold, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        movement_cnt = 0
-        for c in cnts:
-            if cv2.contourArea(c) < config.motion_detection.min_size:
-                continue
-
-            (x, y, w, h) = cv2.boundingRect(c)
-            cv2.rectangle(threshold, (x, y), (x + w, y + h), (0, 255, 0), 2)
-            movement_cnt += 1
-        
-        # Alert
-        if movement_cnt != 0:
-            logger.warning(f"Detected {movement_cnt} movement(s)!")
-            occupied = True
-            finish_save_time = time.time() + 3
-            first_frame = gray
-            if not alarm_reaction.is_alive():
-                alarm_reaction = threading.Thread(target=AlarmReaction)
-                alarm_reaction.alarm = True
-                alarm_reaction.start()
-        else:
-            if finish_save_time <= time.time():
-                occupied = False
-                alarm_reaction.alarm = False
-
-        ed_time=time.time()
-        logger.debug(f"The last round of motion detection took {round(ed_time-st_time,2)} seconds")
-
-        time.sleep(0.05)
 
 if __name__ == "__main__":
     threading.Thread(target=MotionDetection).start()

@@ -8,10 +8,11 @@
     },
     "logging":{
         "file":"ras.log",
-        "level":"debug"
+        "level":"info"
     },
     "settings":{
-        "alarm_buzz":false
+        "alarm_buzz":false,
+        "saving_dir":"/home/pi/ras/videos/"
     },
     "GPIO":{
         "blue":3,
