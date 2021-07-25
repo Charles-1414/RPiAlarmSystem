@@ -2,7 +2,7 @@ from flask import Flask, request, Response, abort
 import numpy as np
 import cv2
 import io
-import base64
+import base64, hashlib
 import json
 import time
 
@@ -12,15 +12,36 @@ streaming_status = True
 frame_np = None
 frame_bytes = None
 frame_ts = 0
+shape = None
+
+@app.route("/verify", methods = ['POST'])
+def verify():
+    if request.headers["User-Agent"] != "RPiAlarmSystem":
+        abort(404)
+    pitoken = request.form["token"]
+    hashed_token = hashlib.sha256(relaytoken.encode()).hexdigest()
+    if pitoken != hashed_token:
+        return json.dumps({"success" : False})
+    else:
+        shape = request.form["shape"]
+        shape = list(map(int, shape.split(", ")))
+        return json.dumps({"success" : True, "token" : relaytoken})
 
 @app.route("/relay", methods = ['GET', 'POST'])
 def relay():
+    if request.headers["User-Agent"] != "RPiAlarmSystem":
+        abort(404)
     try:
+        if request.headers["Token"] != relaytoken:
+            abort(403)
+
         global frame_np
         global frame_bytes
         global frame_ts
+
         if request.method == 'GET':
             return json.dumps({"streaming_status":streaming_status})
+
         elif request.method == 'POST':
             frame_np_buffer = base64.b64decode(request.form["frame_np"])
             frame_np = np.frombuffer(frame_np_buffer, dtype = np.uint8)
@@ -28,6 +49,7 @@ def relay():
             frame_bytes = cv2.imencode('.jpg', frame_np)[1]
             frame_ts = time.time()
             return json.dumps({"success":True,"streaming_status":streaming_status})
+
     except:
         import traceback
         traceback.print_exc()
@@ -38,7 +60,7 @@ def streaming():
     cur_frame_ts = 0
     cur_sleep_cnt = 0 # send a response each 10 sec to prevent disconnection
     while True:
-        if frame_ts != cur_frame_ts or cur_sleep_cnt == 10:
+        if frame_ts != cur_frame_ts or cur_sleep_cnt == 100:
             cur_sleep_cnt = 0
             cur_frame_ts = frame_ts
             streaming_status = True
@@ -47,7 +69,6 @@ def streaming():
         cur_sleep_cnt += 0.1
         time.sleep(0.1)
     streaming_status = False
-
 
 @app.route("/stream", methods = ['GET'])
 def stream():

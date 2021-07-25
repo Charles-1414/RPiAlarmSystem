@@ -9,9 +9,7 @@
         "min_size":1000
     },
     "relay":{
-        "local_thread":6,//set more thread if the connection from your pi to your server is slow
-        "desired_fps":2,//don't make it too high or it may eat your pi resource
-        "server_path":"http[s]://[your server address]:[your server port]/relay",
+        "server":"http[s]://[your server address]:[your server port]/",
         "token":"[any string you want, make it complex!]"
     },
     "logging":{

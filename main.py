@@ -7,7 +7,7 @@ import numpy as np
 
 import os,sys
 import threading
-import base64
+import base64,hashlib
 import json,requests
 import time,datetime
 import coloredlogs,logging
@@ -28,7 +28,9 @@ class Dict2Obj(object):
 
 config_txt = open("./config.json","r").read()
 config = Dict2Obj(json.loads(config_txt))
-motion_output = None
+if not config.relay.server.endswith("/"):
+    config.relay.server += "/"
+
 
 # GPIO Setup
 GPIO.setwarnings(False)
@@ -72,6 +74,8 @@ def ConfigUpdater():
                 logger.info("Successfully imported config")
                 config = new_config
                 config_txt = new_config_txt
+                if not config.relay.server.endswith("/"):
+                    config.relay.server += "/"
         except Exception as e:
             logger.error(f"Failed to import config: {str(e)}")
         time.sleep(1)
@@ -85,8 +89,8 @@ def GetDHTInfo():
     global temperature
     while 1:
         try:
-            r=requests.get("http://127.0.0.1:8001/info")
-            d=json.loads(r.text)
+            r = requests.get("http://127.0.0.1:8001/info")
+            d = json.loads(r.text)
             humidity = d["humidity"]
             temperature = d["temperature"]
         except:
@@ -465,46 +469,57 @@ class StreamingServer(socketserver.ThreadingMixIn, server.HTTPServer):
     daemon_threads = True
 
 # WAN Streaming (Sending data to relay server)
-upload_threads = 0
-avg_upload_time = -1
+
+# Obviously socket streaming will be best
+# But CloudFlare supports limited websocket connection
+# So we have to fallback to HTTP streaming
+# However we still can use the keep-alive method
+
 def WANStreaming():
+    frame = None
+    while frame is None:
+        with output.condition:
+            output.condition.wait()
+            frame = output.frame_cv2
+        time.sleep(1)
+    
+    # Set Request Session
+    session = requests.Session()
+    session.verify = True
+
+    # Verify Relay Server
+    hashed_token = hashlib.sha256(config.relay.token.encode()).hexdigest()
+    r = session.post(config.relay.server + "verify", data = {"token" : hashed_token, "shape" : str(frame.shape)[1:-1]}, \
+        headers = {'User-Agent': 'RPiAlarmSystem'})
+    ok = False
+    if r.status_code == 200:
+        d = json.loads(r.text)
+        if d["success"] is True:
+            if d["token"] == config.relay.token:
+                ok = True
+            else:
+                ok = False
+        else:
+            ok = False
+    else:
+        ok = False
+    
+    if not ok:
+        logger.warning("Failed to verify relay server. WAN Streaming disabled.")
+        return
+    logger.info("Successfully verified relay server. Starting WAN Streaming.")
+
+    # Prepare to stream
     time.sleep(30)
-    headers = {"auth" : config.relay.token}
+    headers = {"Token" : config.relay.token, 'User-Agent': 'RPiAlarmSystem'}
     global streaming_status
     stream_was_on = False
-    global upload_threads
-    global avg_upload_time
-
-    def Upload(frame_np, shape):
-        global streaming_status
-        global stream_was_on
-        global upload_threads
-        global avg_upload_time
-        st = time.time()
-        r = requests.post(config.relay.server_path, data = {"frame_np" : frame_np, "shape": shape}, headers = headers)
-        ed = time.time()
-        if avg_upload_time == -1:
-            avg_upload_time = round(ed - st, 2)
-        else:
-            avg_upload_time = (avg_upload_time + round(ed - st, 2)) / 2
-        if r.status_code == 200:
-            d = json.loads(r.text)
-            if d["streaming_status"] is False:
-                streaming_status -= 1
-                stream_was_on = False
-                if streaming_status == 0:
-                    gpiooff(config.GPIO.blue)
-
-        else:
-            logger.error("Unknown error occured at relay server")
-            time.sleep(5)
-        upload_threads -= 1
 
     while 1:
         # first comfirm someone is watching the stream to reduce the use of
         # system resource and server bandwidth
         if not stream_was_on:
-            r = requests.get(config.relay.server_path, headers = headers)
+            r = session.get(config.relay.server + "relay", headers = headers)
             d = json.loads(r.text)
             if d["streaming_status"] is False:
                 if stream_was_on:
@@ -526,13 +541,44 @@ def WANStreaming():
         # as pi has really slow computing power, we'll upload the bytes array
         # to the server and let the server encode it to jpeg image
         frame_np = base64.b64encode(frame.tostring()).decode()
+    
+        shape = str(frame.shape)[1:-1]
         
-        if upload_threads < config.relay.local_thread:
-            upload_threads += 1
-            threading.Thread(target=Upload,args=(frame_np, str(frame.shape)[1:-1],)).start()
+        r = session.post(config.relay.server + "relay", data = {"frame_np" : frame_np, "shape": shape}, headers = headers)
+        if r.status_code == 200:
+            d = json.loads(r.text)
+            if d["streaming_status"] is False:
+                streaming_status -= 1
+                stream_was_on = False
+                if streaming_status == 0:
+                    gpiooff(config.GPIO.blue)
+
+        else:
+            logger.error("Unknown error occured at relay server")
+            time.sleep(5)
+
         
-        # expectation: 2 fps
-        time.sleep(max((1 / config.relay.desired_fps) - (avg_upload_time / config.relay.local_thread),0))
+        time.sleep(0.1)
+
+# Starting show
+# for _ in range(3):
+#     gpioon(config.GPIO.blue)
+#     gpioon(config.GPIO.yellow)
+#     gpioon(config.GPIO.buzzer)
+#     time.sleep(0.5)
+#     gpiooff(config.GPIO.blue)
+#     gpiooff(config.GPIO.yellow)
+#     gpiooff(config.GPIO.buzzer)
+#     time.sleep(0.5)
+
+for _ in range(25):
+    gpioon(config.GPIO.blue)
+    gpiooff(config.GPIO.yellow)
+    time.sleep(0.1)
+    gpiooff(config.GPIO.blue)
+    gpioon(config.GPIO.yellow)
+    time.sleep(0.1)
+gpiooff(config.GPIO.yellow)
 
 
 if __name__ == "__main__":
