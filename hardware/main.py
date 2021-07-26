@@ -11,9 +11,13 @@ import json, requests
 import time, datetime
 import coloredlogs, logging
 
+
+
 # Starting
 script_start_time = time.time()
-# No actual running within first 15 seconds
+# No motion detection within first 15 seconds
+
+
 
 # Import config
 class Dict2Obj(object):
@@ -29,6 +33,7 @@ config_txt = open("./config.json","r").read()
 config = Dict2Obj(json.loads(config_txt))
 if not config.relay.server.endswith("/"):
     config.relay.server += "/"
+
 
 
 # GPIO Setup
@@ -48,7 +53,9 @@ gpiooff(config.GPIO.blue)
 gpiooff(config.GPIO.yellow)
 gpiooff(config.GPIO.buzzer)
 
-# Set logger
+
+
+# Logger Setup
 coloredlogs.install()
 coloredlogs.set_level(config.logging.display_level.upper())
 loglvl = {"debug": logging.DEBUG, "info": logging.INFO, "warning": logging.WARNING, "error": logging.ERROR, "critical": logging.CRITICAL}
@@ -60,6 +67,8 @@ formatter = logging.Formatter("[%(levelname)s] (%(asctime)s) %(message)s")
 handler.setFormatter(formatter)
 logger.addHandler(handler)
 logger.info("RAS started")
+
+
 
 # Config Updater 
 def ConfigUpdater():
@@ -79,7 +88,9 @@ def ConfigUpdater():
             logger.error(f"Failed to import config: {str(e)}")
         time.sleep(1)
 
-# Get DHT Info
+
+
+# DHT Info Fetcher
 humidity = "--"
 temperature = "--"
 
@@ -96,7 +107,13 @@ def GetDHTInfo():
             pass
         time.sleep(3)
 
+
+
 # Video Writer
+video_writer_in_use = 0
+total_video_writers = 0
+video_writers = {}
+
 fourcc = cv2.VideoWriter_fourcc('m', 'p', '4', 'v')
 class VideoWriter(object):
     def __init__(self):
@@ -128,9 +145,7 @@ class VideoWriter(object):
         self.video_writer.release()
         logger.info(f"Video Writer {writer_id} stopped")
 
-video_writer_in_use = 0
-total_video_writers = 0
-video_writers = {}
+
 
 # Camera output
 import io
@@ -160,8 +175,8 @@ class StreamingOutput(object):
                 self.frame_timestamp = datetime.datetime.now()
                 
                 memfree = 0
-                if len(self.frame_org) > 1000:
-                    # add watermark
+                if len(self.frame_org) > 1000: # make sure it's a valid frame (it's often invalid in the first seconds)
+                    # Add watermark
                     frame_np = np.asarray(bytearray(self.frame_org), dtype=np.uint8)
                     self.frame_cv2 = cv2.imdecode(frame_np, cv2.IMREAD_COLOR)
 
@@ -199,6 +214,7 @@ class StreamingOutput(object):
                         (int(shp[1]/2),int(shp[0]-26*ratio)), cv2.FONT_HERSHEY_SIMPLEX, 1.4 * ratio, text_color, thickness=2)
 
 
+                # Write video if occupied
                 if occupied and video_writer_in_use != 0:
                     memfree /= 1024
                     if memfree < 50:
@@ -212,6 +228,8 @@ class StreamingOutput(object):
                         video_writers[video_writer_in_use].frames[video_writers[video_writer_in_use].frame_cnt + 1] = self.frame_cv2
                         video_writers[video_writer_in_use].frame_cnt += 1
 
+
+                # Calculate fps (only for debug use)
                 if self.fps_ts == 0:
                     self.fps_ts = int(time.time())
                 else:
@@ -224,6 +242,7 @@ class StreamingOutput(object):
                         self.fps_cnt = 0
                         self.fps_ts = int(time.time())
                 
+
                 self.condition.notify_all()
 
             self.buffer.seek(0)
@@ -232,10 +251,12 @@ class StreamingOutput(object):
 
 output = StreamingOutput()
 
+### CORE CODE
 # Motion Detection
 finish_save_time = 100000000000
 
 def MotionDetection():
+    # Alarm Reaction for GPIO LEDs
     def AlarmReaction():
         t = threading.currentThread()
         while getattr(t, "alarm", True):
@@ -253,10 +274,20 @@ def MotionDetection():
     alarm_reaction = threading.Thread(target=AlarmReaction)
     alarm_reaction.alarm = True
 
+    # Wait for the camera to be ready
     time.sleep(5)
+
     logger.info("Motion Detection started!")
     first_frame = None
+    global occupied
+    global finish_save_time
+
+    global video_writers
+    global video_writer_in_use
+    global total_video_writers
+
     while 1:
+        # Get frame from output
         frame = None
         backup_frame = None
         with output.condition:
@@ -264,9 +295,8 @@ def MotionDetection():
             frame = output.frame_cv2
             backup_frame = frame
 
+        # Set start time for timing calculation (debug only)
         st_time=time.time()
-        global occupied
-        global finish_save_time
         
         # Compress image (must do!)
         resize_resolution = config.motion_detection.resolution.split("x")
@@ -281,7 +311,7 @@ def MotionDetection():
             first_frame = gray
             continue
 
-        # Real Motion Detection starts from here!
+        ### Real Motion Detection starts from here!
         
         # Calculates difference to detect motion
         delta_frame = cv2.absdiff(first_frame, gray)
@@ -301,51 +331,61 @@ def MotionDetection():
             cv2.rectangle(threshold, (x, y), (x + w, y + h), (0, 255, 0), 2)
             movement_cnt += 1
         
-        # Alert
-        global video_writers
-        global video_writer_in_use
-        global total_video_writers
+        # Alert if occupied
         if movement_cnt != 0:
             logger.warning(f"Detected {movement_cnt} movement(s)!")
             occupied = True
+
             finish_save_time = time.time() + 3
             first_frame = gray
             f = config.settings.saving_dir
             if not f.endswith("/"):
                 f += "/"
             f += f"{int(time.time())}.mp4"
-            ratio = int(resolution[1]) / 1952
+
+            ratio = int(resolution[1]) / 1952 # stretch ratio
             
             if video_writer_in_use == 0:
+                # No active video writer so create one
                 video_writer_in_use = total_video_writers + 1
                 total_video_writers += 1
+
                 vw = VideoWriter()
                 vw.video_writer = cv2.VideoWriter(f, fourcc, \
                     round(avgfps), (int(resolution[0]), int(resolution[1]) + int(148 * ratio)))
                 vw.frame_cnt += 1
                 vw.frames[vw.frame_cnt] = backup_frame
                 video_writers[video_writer_in_use] = vw
+
                 threading.Thread(target=video_writers[video_writer_in_use].write,args=(video_writer_in_use,)).start()
 
             if not alarm_reaction.is_alive():
+                # No active alarm reaction so start it
                 alarm_reaction = threading.Thread(target=AlarmReaction)
                 alarm_reaction.alarm = True
                 alarm_reaction.start()
+
         else:
             if finish_save_time <= time.time():
+                # To finish writing video and save
                 logger.info(f"Video Writer {video_writer_in_use} to finish writing and save")
+
                 finish_save_time = 100000000000
                 occupied = False
                 alarm_reaction.alarm = False
+
                 video_writers[video_writer_in_use].do_write = False
                 video_writer_in_use = 0
 
+        # Calculate timing
         ed_time=time.time()
         logger.debug(f"The last round of motion detection took {round(ed_time-st_time,2)} seconds")
 
         time.sleep(0.05)
 
-# Streaming server
+
+
+# LAN Streaming
 import socketserver
 from http import server
 
@@ -412,14 +452,61 @@ class StreamingServer(socketserver.ThreadingMixIn, server.HTTPServer):
     allow_reuse_address = True
     daemon_threads = True
 
-# WAN Streaming (Sending data to relay server)
+
+
+# Relay Server (WAN Streaming + File Relay)
 
 # Obviously socket streaming will be best
 # But CloudFlare supports limited websocket connection
 # So we have to fallback to HTTP streaming
-# However we still can use the keep-alive method
+# It's still acceptable
 
-def WANStreaming():
+relay_status = 0
+def VerifyRelayServer():
+    global relay_status
+    session = requests.Session()
+    session.verify = True
+
+    while 1:
+        logger.info("Verifying relay server...")
+
+        ok = 0
+        hashed_token = generate_password_hash(config.relay.token)
+        r = session.post(config.relay.server + "verify", data = {"token" : hashed_token}, headers = {'User-Agent': 'RPiAlarmSystem'})
+        try:
+            if r.status_code == 200:
+                d = json.loads(r.text)
+                if d["success"] is True:
+                    if d["token"] != hashed_token and check_password_hash(d["token"], config.relay.token):
+                        ok = 1
+                    else:
+                        ok = -1
+                else:
+                    ok = -1
+            else:
+                ok = 0
+        except:
+            ok = 0 # connection timed out
+
+        relay_status = ok
+
+        if ok == 0:
+            logger.warning("Failed to connect to relay server. Retrying after 30 seconds...")
+        
+        elif ok == -1:
+            logger.warning("Failed to verify relay server.")
+            time.sleep(570)
+
+        else:
+            logger.info("Successfully verified relay server.")
+            time.sleep(270)
+
+        time.sleep(30)
+
+
+def StreamRelay():
+    global relay_status
+
     frame = None
     while frame is None:
         with output.condition:
@@ -430,77 +517,28 @@ def WANStreaming():
     # Set Request Session
     session = requests.Session()
     session.verify = True
-
-    def VerifyRelayServer():
-        ok = 0
-        hashed_token = generate_password_hash(config.relay.token)
-        r = session.post(config.relay.server + "verify", data = {"token" : hashed_token}, headers = {'User-Agent': 'RPiAlarmSystem'})
-        if r.status_code == 200:
-            d = json.loads(r.text)
-            if d["success"] is True:
-                if d["token"] != hashed_token and check_password_hash(d["token"], config.relay.token):
-                    ok = 1
-                else:
-                    ok = -1
-            else:
-                ok = -1
-        else:
-            ok = 0
-        return ok
-
-    ok = 0
-    for _ in range(5):
-        # Verify Relay Server
-        ok = VerifyRelayServer()
-        if ok == 0:
-            logger.warning("Failed to connect to relay server. Retrying after 30 seconds...")
-            time.sleep(30)
-            continue
-        
-        elif ok == -1:
-            logger.warning("Failed to verify relay server. WAN Streaming disabled.")
-            return
-
-        logger.info("Successfully verified relay server. Starting WAN Streaming.")
-        break
     
-    if ok == 0:
-        logger.warning("Failed to connect to relay server. WAN Streaming disabled.")
-        return
+    while relay_status != 1:
+        time.sleep(5)
 
+    logger.info("Relay server verified! WAN Streaming enabled!")
 
     # Prepare to stream
     time.sleep(30)
     global streaming_status
     stream_was_on = True
 
-    last_verify = time.time()
     while 1:
+        while relay_status != 1:
+            time.sleep(5)
+
         # Update hashed token each loop
         headers = {"Token" : generate_password_hash(config.relay.token), 'User-Agent': 'RPiAlarmSystem'}
-
-        # Verify server every 5 minutes
-        if time.time() - last_verify >= 300:
-            while 1:
-                # Verify Relay Server
-                ok = VerifyRelayServer()
-                if ok == 0:
-                    logger.warning("Failed to connect to relay server. Retrying after 30 seconds...")
-                    time.sleep(30)
-                    continue
-                
-                elif ok == -1:
-                    logger.warning("Failed to verify relay server. WAN Streaming disabled.")
-                    return
-
-                logger.info("Successfully verified relay server. Starting WAN Streaming.")
-                break
-
 
         # first comfirm someone is watching the stream to reduce the use of
         # system resource and server bandwidth
         if not stream_was_on:
-            r = session.get(config.relay.server + "relay", headers = headers)
+            r = session.get(config.relay.server + "stream_relay", headers = headers)
             if r.status_code != 200:
                 continue
             
@@ -515,6 +553,7 @@ def WANStreaming():
             
             streaming_status += 1
             stream_was_on = True
+            logger.warning("Someone started to watch stream through relay server! Check more info on relay server's log.")
 
         gpioon(config.GPIO.blue)
         frame = None
@@ -527,7 +566,7 @@ def WANStreaming():
         # (current) due to the really slow network speed, I decided to encode img on pi
         # the numpy size is more than 20x bigger than jpg size
 
-        r = session.post(config.relay.server + "relay", data = frame , headers = headers)
+        r = session.post(config.relay.server + "stream_relay", data = frame , headers = headers)
         if r.status_code == 200:
             d = json.loads(r.text)
             if d["streaming_status"] is False:
@@ -542,32 +581,85 @@ def WANStreaming():
 
         time.sleep(0.1)
 
-# Starting show
-for _ in range(3):
-    gpioon(config.GPIO.blue)
-    gpioon(config.GPIO.yellow)
-    gpioon(config.GPIO.buzzer)
-    time.sleep(0.5)
-    gpiooff(config.GPIO.blue)
-    gpiooff(config.GPIO.yellow)
-    gpiooff(config.GPIO.buzzer)
-    time.sleep(0.5)
+def FileRelay():
+    global relay_status
 
-for _ in range(25):
-    gpioon(config.GPIO.blue)
-    gpiooff(config.GPIO.yellow)
-    time.sleep(0.1)
-    gpiooff(config.GPIO.blue)
-    gpioon(config.GPIO.yellow)
-    time.sleep(0.1)
-gpiooff(config.GPIO.yellow)
+    session = requests.Session()
+
+    while relay_status != 1:
+        time.sleep(5)
+    logger.info("Relay server verified! WAN File Download enabled!")
+
+    while 1:
+        while relay_status != 1:
+            time.sleep(5)
+        
+        headers = {"Token" : generate_password_hash(config.relay.token), 'User-Agent': 'RPiAlarmSystem'}
+
+        # Upload file list
+        l = os.listdir("./videos")
+        r = session.post(config.relay.server + "file_relay/file_list", data = {'list': ' '.join(l)}, headers = headers)
+        if r.status_code != 200:
+            continue
+        
+        # Check download request
+        r = session.get(config.relay.server + "file_relay/download_request", headers = headers)
+        if r.status_code != 200:
+            continue
+        d = json.loads(r.text)
+        f = d["file"]
+        if f != '':
+            if os.path.exists(f"./videos/{f}"):
+                logger.warning(f"Relay server requested video file {f}. Uploading...")
+                r = session.post(config.relay.server + f"file_relay/upload{f}", data = open(f"./videos/{f}", "rb"), headers = headers)
+                logger.warning(f"Relay server requested video file {f}. Uploaded!")
+                if r.status_code != 200:
+                    continue
+            else:
+                r = session.post(config.relay.server + "cancel_upload", headers = headers)
+                if r.status_code != 200:
+                    continue
+        
+        time.sleep(5)
+
+
+
 
 
 if __name__ == "__main__":
-    threading.Thread(target=MotionDetection).start()
+    # Starting show
+    # for _ in range(3):
+    #     gpioon(config.GPIO.blue)
+    #     gpioon(config.GPIO.yellow)
+    #     gpioon(config.GPIO.buzzer)
+    #     time.sleep(0.5)
+    #     gpiooff(config.GPIO.blue)
+    #     gpiooff(config.GPIO.yellow)
+    #     gpiooff(config.GPIO.buzzer)
+    #     time.sleep(0.5)
+
+    # for _ in range(25):
+    #     gpioon(config.GPIO.blue)
+    #     gpiooff(config.GPIO.yellow)
+    #     time.sleep(0.1)
+    #     gpiooff(config.GPIO.blue)
+    #     gpioon(config.GPIO.yellow)
+    #     time.sleep(0.1)
+    # gpiooff(config.GPIO.yellow)
+
+
+    # Start functions
     threading.Thread(target=ConfigUpdater).start()
     threading.Thread(target=GetDHTInfo).start()
-    threading.Thread(target=WANStreaming).start()
+
+    threading.Thread(target=MotionDetection).start()
+
+    threading.Thread(target=VerifyRelayServer).start()
+    threading.Thread(target=StreamRelay).start()
+    threading.Thread(target=FileRelay).start()
+
+
+    # Start camera
     with picamera.PiCamera(resolution=config.resolution, framerate=config.fps) as camera:
         time.sleep(3)
         camera.start_recording(output, format='mjpeg')
