@@ -8,7 +8,7 @@ A monitoring system with motion detector, based on RaspberryPi
 i) Motion Detection  
 ii) Video saving after motion is detected  
 iii) Realtime streaming (LAN & WAN)  
-iv) Video file download (LAN & WAN)  
+iv) Video file download (LAN & WAN) delete (LAN only)
 
 ### More details
 i) Automatically limiting saving video fps when little memory is free.  
