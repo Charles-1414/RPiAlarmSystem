@@ -1,9 +1,13 @@
 
 {
     // those settings work well for Pi3. Pi4 may be able to handle higher fps and higher resolution
+    // you can increase the fps if you want no motion detection, if can be increased to 32
     "fps":12,
     "resolution":"1296x976",
     "motion_detection":{
+        "enable": true, 
+        "watermark": true, // if you disable this, the timestamp and system info at the bottom of the video will not be added
+        // if you disable motion detection and watermark, the LAN streaming will be smoother but pi will not detect motion and record anything
         "resolution":"648x488",
         "threads":1,
         "min_size":1000
@@ -15,7 +19,7 @@
     "logging":{
         "file":"ras.log",
         "level":"info",
-        "display_level":"debug"
+        "display_level":"info"
     },
     "settings":{
         "alarm_buzz":false, // to prevent your pi from buzzing suddenly and scare yourself :D

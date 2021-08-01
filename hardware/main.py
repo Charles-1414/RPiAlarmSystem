@@ -1,3 +1,4 @@
+print("Loading...")
 import picamera
 import RPi.GPIO as GPIO
 
@@ -80,6 +81,7 @@ def ConfigUpdater():
             new_config = Dict2Obj(json.loads(new_config_txt))
             if config_txt != new_config_txt:
                 logger.info("Successfully imported config")
+                logger.warning("You may need to restart the script to make some changes take effect!")
                 config = new_config
                 config_txt = new_config_txt
                 if not config.relay.server.endswith("/"):
@@ -173,60 +175,64 @@ class StreamingOutput(object):
             with self.condition:
                 self.frame_org = self.buffer.getvalue()
                 self.frame_timestamp = datetime.datetime.now()
-                
                 memfree = 0
-                if len(self.frame_org) > 1000: # make sure it's a valid frame (it's often invalid in the first seconds)
-                    # Add watermark
-                    frame_np = np.asarray(bytearray(self.frame_org), dtype=np.uint8)
-                    self.frame_cv2 = cv2.imdecode(frame_np, cv2.IMREAD_COLOR)
+                memtotal = 1
+                with open('/proc/meminfo',"r") as f:
+                    for l in f.readlines():
+                        if l.startswith('MemFree'):
+                            memfree = int(l.split()[1])
+                        elif l.startswith("MemTotal"):
+                            memtotal = int(l.split()[1])
+                cputemp = float(open("/sys/class/thermal/thermal_zone0/temp","r").read())/1000
 
-                    frame_resolution = config.resolution.split("x")
-                    frame_resolution = (int(frame_resolution[0]), int(frame_resolution[1]))
-                    ratio = frame_resolution[1] / 1952
-                    self.frame_cv2  = cv2.copyMakeBorder(self.frame_cv2,0,int(8 * ratio),0,0,cv2.BORDER_CONSTANT,value=[255,0,0])
-                    self.frame_cv2  = cv2.copyMakeBorder(self.frame_cv2,0,int(140 * ratio),0,0,cv2.BORDER_CONSTANT,value=[0,0,0])
+                if config.motion_detection.watermark:
+                    if len(self.frame_org) > 976: # make sure it's a valid frame (it's often invalid in the first seconds)
+                        # Add watermark
+                        frame_np = np.asarray(bytearray(self.frame_org), dtype=np.uint8)
+                        self.frame_cv2 = cv2.imdecode(frame_np, cv2.IMREAD_COLOR)
 
-                    text_color = (255,255,255)
+                        frame_resolution = config.resolution.split("x")
+                        frame_resolution = (int(frame_resolution[0]), int(frame_resolution[1]))
+                        ratio = frame_resolution[1] / 1952
+                        self.frame_cv2  = cv2.copyMakeBorder(self.frame_cv2,0,int(8 * ratio),0,0,cv2.BORDER_CONSTANT,value=[255,0,0])
+                        self.frame_cv2  = cv2.copyMakeBorder(self.frame_cv2,0,int(140 * ratio),0,0,cv2.BORDER_CONSTANT,value=[0,0,0])
 
-                    shp = self.frame_cv2.shape
-                    ts = self.frame_timestamp.strftime("%A %d %B %Y %H:%M:%S")
-                    memfree = 0
-                    memtotal = 1
-                    with open('/proc/meminfo',"r") as f:
-                        for l in f.readlines():
-                            if l.startswith('MemFree'):
-                                memfree = int(l.split()[1])
-                            elif l.startswith("MemTotal"):
-                                memtotal = int(l.split()[1])
-                    cputemp = float(open("/sys/class/thermal/thermal_zone0/temp","r").read())/1000
-                    memwarn = ""
-                    if memfree/1024 < 100:
-                        memwarn = "[Low MEM]"
-                        text_color = (0,255,255)
-                    txt = f"{config.resolution}  |  Humidity: {humidity}%  | Temperature: {temperature}C  |  CPU Temperature: {round(cputemp,1)}C  |  MEM Used: {int((memtotal - memfree) / memtotal * 100)}% {memwarn}"
+                        text_color = (255,255,255)
 
-                    if occupied:
-                        text_color = (0,0,255)
+                        shp = self.frame_cv2.shape
+                        ts = self.frame_timestamp.strftime("%A %d %B %Y %H:%M:%S")
 
-                    cv2.putText(self.frame_cv2, txt, (10,int(shp[0]-86*ratio)), cv2.FONT_HERSHEY_SIMPLEX, 1.4 * ratio, text_color, thickness=2)
-                    cv2.putText(self.frame_cv2, ts, (10,int(shp[0]-26*ratio)), cv2.FONT_HERSHEY_SIMPLEX, 1.4 * ratio, text_color, thickness=2)
-                    cv2.putText(self.frame_cv2, "Captured by RPiAlarmSystem (C) 2021 Charles", 
-                        (int(shp[1]/2),int(shp[0]-26*ratio)), cv2.FONT_HERSHEY_SIMPLEX, 1.4 * ratio, text_color, thickness=2)
+                        memwarn = ""
+                        if memfree/1024 < 100:
+                            memwarn = "[Low MEM]"
+                            text_color = (0,255,255)
+                        txt = f"{config.resolution}  |  Humidity: {humidity}%  | Temperature: {temperature}C  |  CPU Temperature: {round(cputemp,1)}C  |  MEM Used: {int((memtotal - memfree) / memtotal * 100)}% {memwarn}"
 
+                        if occupied:
+                            text_color = (0,0,255)
 
-                # Write video if occupied
-                if occupied and video_writer_in_use != 0:
-                    memfree /= 1024
-                    if memfree < 50:
-                        if video_writers[video_writer_in_use].mem_warn is False:
-                            video_writers[video_writer_in_use].mem_warn = True
-                            video_writers[video_writer_in_use].mem_warn_starting_frame = video_writers[video_writer_in_use].frame_cnt + 1
-                        if self.fps_cnt in [int(avgfps / 2) - 1, int(avgfps) - 1]: # limit to 2 fps
+                        cv2.putText(self.frame_cv2, txt, (10,int(shp[0]-86*ratio)), cv2.FONT_HERSHEY_SIMPLEX, 1.4 * ratio, text_color, thickness=2)
+                        cv2.putText(self.frame_cv2, ts, (10,int(shp[0]-26*ratio)), cv2.FONT_HERSHEY_SIMPLEX, 1.4 * ratio, text_color, thickness=2)
+                        cv2.putText(self.frame_cv2, "Captured by RPiAlarmSystem (C) 2021 Charles", 
+                            (int(shp[1]/2),int(shp[0]-26*ratio)), cv2.FONT_HERSHEY_SIMPLEX, 1.4 * ratio, text_color, thickness=2)
+
+                if config.motion_detection.enable:
+                    # Write video if occupied
+                    if occupied and video_writer_in_use != 0:
+                        memfree /= 1024
+                        if not config.motion_detection.watermark:
+                            frame_np = np.asarray(bytearray(self.frame_org), dtype=np.uint8)
+                            self.frame_cv2 = cv2.imdecode(frame_np, cv2.IMREAD_COLOR)
+                        if memfree < 50:
+                            if video_writers[video_writer_in_use].mem_warn is False:
+                                video_writers[video_writer_in_use].mem_warn = True
+                                video_writers[video_writer_in_use].mem_warn_starting_frame = video_writers[video_writer_in_use].frame_cnt + 1
+                            if self.fps_cnt in [int(avgfps / 2) - 1, int(avgfps) - 1]: # limit to 2 fps
+                                video_writers[video_writer_in_use].frames[video_writers[video_writer_in_use].frame_cnt + 1] = self.frame_cv2
+                                video_writers[video_writer_in_use].frame_cnt += 1
+                        else:
                             video_writers[video_writer_in_use].frames[video_writers[video_writer_in_use].frame_cnt + 1] = self.frame_cv2
                             video_writers[video_writer_in_use].frame_cnt += 1
-                    else:
-                        video_writers[video_writer_in_use].frames[video_writers[video_writer_in_use].frame_cnt + 1] = self.frame_cv2
-                        video_writers[video_writer_in_use].frame_cnt += 1
 
 
                 # Calculate fps (only for debug use)
@@ -238,6 +244,7 @@ class StreamingOutput(object):
                     else:
                         if self.fps_cnt >= 6:
                             avgfps = round((avgfps + self.fps_cnt) / 2, 2)
+                        print(f"Current FPS: {self.fps_cnt} frames | Average FPS: {avgfps} frames")
                         logger.debug(f"Current FPS: {self.fps_cnt} frames | Average FPS: {avgfps} frames")
                         self.fps_cnt = 0
                         self.fps_ts = int(time.time())
@@ -256,6 +263,9 @@ output = StreamingOutput()
 finish_save_time = 100000000000
 
 def MotionDetection():
+    if config.motion_detection.enable is False:
+        return
+    
     # Alarm Reaction for GPIO LEDs
     def AlarmReaction():
         t = threading.currentThread()
@@ -292,7 +302,11 @@ def MotionDetection():
         backup_frame = None
         with output.condition:
             output.condition.wait()
-            frame = output.frame_cv2
+            if config.motion_detection.watermark:
+                frame = output.frame_cv2
+            else:
+                frame_np = np.asarray(bytearray(output.frame_org), dtype=np.uint8)
+                frame = cv2.imdecode(frame_np, cv2.IMREAD_COLOR)
             backup_frame = frame
 
         # Set start time for timing calculation (debug only)
@@ -351,8 +365,12 @@ def MotionDetection():
                 total_video_writers += 1
 
                 vw = VideoWriter()
-                vw.video_writer = cv2.VideoWriter(f, fourcc, \
-                    round(avgfps), (int(resolution[0]), int(resolution[1]) + int(148 * ratio)))
+                if config.motion_detection.watermark:
+                    vw.video_writer = cv2.VideoWriter(f, fourcc, \
+                        round(avgfps), (int(resolution[0]), int(resolution[1]) + int(148 * ratio)))
+                else:
+                    vw.video_writer = cv2.VideoWriter(f, fourcc, \
+                        round(avgfps), (int(resolution[0]), int(resolution[1])))
                 vw.frame_cnt += 1
                 vw.frames[vw.frame_cnt] = backup_frame
                 video_writers[video_writer_in_use] = vw
@@ -401,7 +419,9 @@ for i in range(0,10):
     t *= 2
     width /= 2
     height /= 2
+status = ["disable","enable"]
 STREAMING_PAGE=f"""<title>RPiAlarmSystem Streaming</title>
+<p>Motion detection is {status[config.motion_detection.enable]}d (You can {status[1-config.motion_detection.enable]} it by changing the config file of your pi)</p>
 <img src="/stream.mjpg" width="{width}" height="{height}" />"""
 
 class StreamingHandler(server.BaseHTTPRequestHandler):
@@ -429,14 +449,19 @@ class StreamingHandler(server.BaseHTTPRequestHandler):
                     gpioon(config.GPIO.blue)
                     with output.condition:
                         output.condition.wait()
-                        frame = cv2.imencode('.jpg', output.frame_cv2)[1]
+                        if config.motion_detection.watermark:
+                            frame = cv2.imencode('.jpg', output.frame_cv2)[1]
+                        else:
+                            frame = output.frame_org
                     self.wfile.write(b'--FRAME\r\n')
                     self.send_header('Content-Type', 'image/jpeg')
                     self.send_header('Content-Length', len(frame))
                     self.end_headers()
                     self.wfile.write(frame)
                     self.wfile.write(b'\r\n')
-                    time.sleep(0.3)
+
+                    if config.motion_detection.enable:
+                        time.sleep(0.3)
 
             except Exception as e:
                 streaming_status -= 1
@@ -511,7 +536,10 @@ def StreamRelay():
     while frame is None:
         with output.condition:
             output.condition.wait()
-            frame = output.frame_cv2
+            if config.motion_detection.watermark:
+                frame = output.frame_cv2
+            else:
+                frame = output.frame_org
         time.sleep(1)
     
     # Set Request Session
@@ -559,7 +587,10 @@ def StreamRelay():
         frame = None
         with output.condition:
             output.condition.wait()
-            frame = cv2.imencode('.jpg', output.frame_cv2)[1].tobytes()
+            if config.motion_detection.watermark:
+                frame = cv2.imencode('.jpg', output.frame_cv2)[1].tobytes()
+            else:
+                frame = output.frame_org
 
         # (abandoned) as pi has really slow computing power, we'll upload the bytes array
         # to the server and let the server encode it to jpeg image
@@ -579,7 +610,10 @@ def StreamRelay():
             logger.error("Unknown error occured at relay server")
             time.sleep(5)
 
-        time.sleep(0.1)
+        if config.motion_detection.enable:
+            time.sleep(0.1)
+        else:
+            time.sleep(0.01)
 
 def FileRelay():
     global relay_status
