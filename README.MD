@@ -21,9 +21,11 @@ iv) The config is compatible with RPi 3. If you have a RPi 4, it may be able to 
 
 Device: RaspberryPi 3B+  
 <table>
-    <tr><th>Motion Detection</th><th>Watermark</th><th>FPS</th></tr>
-    <tr><td>Enabled</td><td>Enabled</td><td>12</td></tr>
-    <tr><td>Disabled</td><td>Disabled</td><td>32</td></tr>
+    <tr><th>Motion Detection</th><th>Watermark</th><th>Streaming FPS</th><th>Recording FPS</th></tr>
+    <tr><td>Enabled</td><td>Enabled</td><td>12</td><td>12</td></tr>
+    <tr><td>Enabled</td><td>Disabled</td><td>32</td><td>12</td></tr>
+    <tr><td>Disabled</td><td>Enabled</td><td>12</td><td>/</td></tr>
+    <tr><td>Disabled</td><td>Disabled</td><td>32</td><td>/</td></tr>
 </table>
 
 ### About the config
