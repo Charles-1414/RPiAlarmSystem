@@ -1,24 +1,7 @@
-print("Loading...")
-import picamera
+import time, json
 import RPi.GPIO as GPIO
-
-import cv2 # install it with `apt-get install python3-opencv`
-import numpy as np
-
-import os, sys
-import threading
-from werkzeug.security import generate_password_hash, check_password_hash
-import json, requests
-import time, datetime
 import coloredlogs, logging
-
-
-
-# Starting
-script_start_time = time.time()
-# No motion detection within first 15 seconds
-
-
+import threading
 
 # Import config
 class Dict2Obj(object):
@@ -37,6 +20,8 @@ if not config.relay.server.endswith("/"):
 
 
 
+
+
 # GPIO Setup
 GPIO.setwarnings(False)
 GPIO.setmode(GPIO.BOARD)
@@ -50,9 +35,40 @@ def gpioon(port):
 def gpiooff(port):
     GPIO.output(port,GPIO.LOW)
 
-gpiooff(config.GPIO.blue)
-gpiooff(config.GPIO.yellow)
 gpiooff(config.GPIO.buzzer)
+
+
+
+
+
+print("Loading")
+def loading():
+    t = threading.currentThread()
+    while getattr(t, "load", True):
+        gpioon(config.GPIO.blue)
+        gpioon(config.GPIO.yellow)
+        time.sleep(0.1)
+        gpiooff(config.GPIO.blue)
+        gpiooff(config.GPIO.yellow)
+        time.sleep(0.1)
+t = threading.Thread(target = loading)
+t.load = True
+t.start()
+
+
+
+
+
+import cv2 # install it with `apt-get install python3-opencv`
+import numpy as np
+import picamera
+
+import os, sys
+from werkzeug.security import generate_password_hash, check_password_hash
+import requests
+import datetime
+
+
 
 
 
@@ -67,9 +83,18 @@ handler = logging.FileHandler(config.logging.file)
 formatter = logging.Formatter("[%(levelname)s] (%(asctime)s) %(message)s")
 handler.setFormatter(formatter)
 logger.addHandler(handler)
+
+
+
+
+
+t.load = False
+gpiooff(config.GPIO.blue)
+gpiooff(config.GPIO.yellow)
 logger.info("RAS started")
 
-
+script_start_time = time.time()
+# No motion detection within first 15 seconds
 
 # Config Updater 
 def ConfigUpdater():
@@ -244,7 +269,6 @@ class StreamingOutput(object):
                     else:
                         if self.fps_cnt >= 6:
                             avgfps = round((avgfps + self.fps_cnt) / 2, 2)
-                        print(f"Current FPS: {self.fps_cnt} frames | Average FPS: {avgfps} frames")
                         logger.debug(f"Current FPS: {self.fps_cnt} frames | Average FPS: {avgfps} frames")
                         self.fps_cnt = 0
                         self.fps_ts = int(time.time())
@@ -572,10 +596,6 @@ def StreamRelay():
             
             d = json.loads(r.text)
             if d["streaming_status"] is False:
-                if stream_was_on:
-                    streaming_status -= 1
-                    if streaming_status == 0:
-                        gpiooff(config.GPIO.blue)
                 time.sleep(5) # to reduce CPU use and also not to be recognized as an attack
                 continue
             
@@ -583,7 +603,8 @@ def StreamRelay():
             stream_was_on = True
             logger.warning("Someone started to watch stream through relay server! Check more info on relay server's log.")
 
-        gpioon(config.GPIO.blue)
+        if streaming_status > 0:
+            gpioon(config.GPIO.blue)
         frame = None
         with output.condition:
             output.condition.wait()
@@ -601,10 +622,12 @@ def StreamRelay():
         if r.status_code == 200:
             d = json.loads(r.text)
             if d["streaming_status"] is False:
-                streaming_status -= 1
                 stream_was_on = False
-                if streaming_status == 0:
-                    gpiooff(config.GPIO.blue)
+                if streaming_status > 0:
+                    streaming_status -= 1
+                    if streaming_status == 0:
+                        logger.warning("Someone stopped to watch stream from WAN! Check more info on relay server's log.")
+                        gpiooff(config.GPIO.blue)
 
         else:
             logger.error("Unknown error occured at relay server")
@@ -661,27 +684,6 @@ def FileRelay():
 
 
 if __name__ == "__main__":
-    # Starting show
-    # for _ in range(3):
-    #     gpioon(config.GPIO.blue)
-    #     gpioon(config.GPIO.yellow)
-    #     gpioon(config.GPIO.buzzer)
-    #     time.sleep(0.5)
-    #     gpiooff(config.GPIO.blue)
-    #     gpiooff(config.GPIO.yellow)
-    #     gpiooff(config.GPIO.buzzer)
-    #     time.sleep(0.5)
-
-    # for _ in range(25):
-    #     gpioon(config.GPIO.blue)
-    #     gpiooff(config.GPIO.yellow)
-    #     time.sleep(0.1)
-    #     gpiooff(config.GPIO.blue)
-    #     gpioon(config.GPIO.yellow)
-    #     time.sleep(0.1)
-    # gpiooff(config.GPIO.yellow)
-
-
     # Start functions
     threading.Thread(target=ConfigUpdater).start()
     threading.Thread(target=GetDHTInfo).start()

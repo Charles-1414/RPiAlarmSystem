@@ -17,6 +17,15 @@ ii) The pi is connected with a Adafruit DHT sensor so it can detect humidity and
 iii) Due to obvious reasons, the WAN Streaming has bad performance (0.6 frame per second) comparing to LAN Streaming (2 frame per second).  
 iv) The config is compatible with RPi 3. If you have a RPi 4, it may be able to process frames of higher resolution and higher fps. :)  
 
+### Testing results
+
+Device: RaspberryPi 3B+  
+<table>
+    <tr><th>Motion Detection</th><th>Watermark</th><th>FPS</th></tr>
+    <tr><td>Enabled</td><td>Enabled</td><td>12</td></tr>
+    <tr><td>Disabled</td><td>Disabled</td><td>32</td></tr>
+</table>
+
 ### About the config
 Motion detection and watermark can be disabled.  
 If you disable motion detection, pi will not detect motion and record videos.  
